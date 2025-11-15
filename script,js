@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; padding: 10px; background-color: #222; font-family: Arial; }
+canvas { display: block; border: 3px solid #fff; background-color: #87CEEB; margin-bottom: 10px; }
+#info { color: white; margin-bottom: 10px; }
+#lobby { color: white; padding: 10px; background: #333; border-radius: 5px; margin-bottom: 10px; }
+.status { color: #0f0; }
+#joinBtn, #createBtn { padding: 8px 15px; margin-right: 10px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 3px; }
+#joinBtn:hover, #createBtn:hover { background: #45a049; }
+</style>
+</head>
+<body>
+<div id="lobby">
+  <h2>🎮 Multiplayer Arena (bis zu 4 Spieler)</h2>
+  <input type="text" id="playerName" placeholder="Dein Name" value="Spieler">
+  <input type="text" id="roomCode" placeholder="Raum-Code">
+  <button id="createBtn">Raum erstellen</button>
+  <button id="joinBtn">Beitreten</button>
+  <p id="status">Bereit zum Spielen</p>
+</div>
+<canvas id="gameCanvas" width="1000" height="600"></canvas>
+<div id="info">
+  <p id="playersList"></p>
+  <p>Pfeiltasten: Bewegen | Space: Springen | X: Schießen</p>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Multiplayer System
+const gameState = {
+  players: {},
+  enemies: [],
+  bullets: [],
+  myId: null,
+  roomCode: null,
+  gameRunning: false
+};
+
+// Lokaler Spieler
+let player = {
+  x: 50,
+  y: 300,
+  width: 25,
+  height: 35,
+  velocityY: 0,
+  velocityX: 0,
+  jumping: false,
+  speed: 5,
+  jumpPower: 15,
+  health: 5,
+  score: 0,
+  name: 'Spieler'
+};
+
+const gravity = 0.6;
+const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+const playerColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A'];
+
+function playKillSound() {
+  const now = audioContext.currentTime;
+  const duration = 0.5;
+  const osc = audioContext.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(80, now);
+  osc.frequency.exponentialRampToValueAtTime(20, now + duration);
+  const gain = audioContext.createGain();
+  gain.gain.setValueAtTime(0.3, now);
+  gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+  osc.connect(gain);
+  gain.connect(audioContext.destination);
+  osc.start(now);
+  osc.stop(now + duration);
+}
+
+// UI
+document.getElementById('createBtn').addEventListener('click', createRoom);
+document.getElementById('joinBtn').addEventListener('click', joinRoom);
+
+function createRoom() {
+  const playerName = document.getElementById('playerName').value || 'Spieler';
+  const roomCode = Math.random().toString(36).substr(2, 6).toUpperCase();
+  
+  player.name = playerName;
+  gameState.myId = 'player_' + Date.now();
+  gameState.roomCode = roomCode;
+  gameState.players[gameState.myId] = { ...player, color: playerColors[0] };
+  // Make the stored object the authoritative local player reference
+  player = gameState.players[gameState.myId];
+  
+  document.getElementById('status').innerHTML = `Raum erstellt: <span class="status">${roomCode}</span>`;
+  startGame();
+}
+
+function joinRoom() {
+  const playerName = document.getElementById('playerName').value || 'Spieler';
+  const roomCode = document.getElementById('roomCode').value;
+  
+  if (!roomCode) {
+    alert('Bitte Raum-Code eingeben');
+    return;
+  }
+  
+  player.name = playerName;
+  gameState.myId = 'player_' + Date.now();
+  gameState.roomCode = roomCode;
+  const colorIndex = Object.keys(gameState.players).length % playerColors.length;
+  gameState.players[gameState.myId] = { ...player, color: playerColors[colorIndex] };
+  player = gameState.players[gameState.myId];
+  
+  document.getElementById('status').innerHTML = `Mit Raum verbunden: <span class="status">${roomCode}</span>`;
+  startGame();
+}
+
+function startGame() {
+  gameState.gameRunning = true;
+  document.getElementById('lobby').style.display = 'none';
+  gameState.enemies = [
+    { x: 300, y: 410, width: 30, height: 30, directionX: 2, minX: 200, maxX: 400, health: 3, shootTimer: 0 },
+    { x: 650, y: 340, width: 30, height: 30, directionX: -2, minX: 550, maxX: 750, health: 3, shootTimer: 0 }
+  ];
+  gameLoop();
+}
+
+// Tasten
+const keys = {};
+document.addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  // Verwende e.code für Space, ist in allen Browsern konsistent
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!player.jumping) {
+      player.velocityY = -player.jumpPower;
+      player.jumping = true;
+    }
+  }
+  if (e.key === 'x' || e.key === 'X') {
+    gameState.bullets.push({
+      x: player.x + player.width / 2,
+      y: player.y,
+      velocityX: 8,
+      width: 8,
+      height: 4,
+      owner: gameState.myId
+    });
+  }
+});
+document.addEventListener('keyup', (e) => { keys[e.key] = false; });
+
+// Plattformen
+const platforms = [
+  { x: 0, y: 550, width: 1000, height: 50 },
+  { x: 200, y: 450, width: 250, height: 20 },
+  { x: 550, y: 380, width: 250, height: 20 },
+  { x: 250, y: 300, width: 150, height: 20 },
+  { x: 700, y: 280, width: 200, height: 20 },
+  { x: 400, y: 200, width: 150, height: 20 }
+];
+
+function drawPlatforms() {
+  ctx.fillStyle = '#8B4513';
+  platforms.forEach(p => {
+    ctx.fillRect(p.x, p.y, p.width, p.height);
+    ctx.strokeStyle = '#654321';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(p.x, p.y, p.width, p.height);
+  });
+}
+
+function drawPlayer(p) {
+  const color = p.color || '#FF6B6B';
+  ctx.fillStyle = color;
+  ctx.fillRect(p.x, p.y, p.width, p.height);
+  ctx.fillStyle = '#FFD93D';
+  ctx.fillRect(p.x + 5, p.y + 5, 8, 8);
+  ctx.fillRect(p.x + 12, p.y + 5, 8, 8);
+  ctx.fillStyle = '#333333';
+  ctx.fillRect(p.x + p.width, p.y + 10, 10, 5);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 12px Arial';
+  ctx.fillText(p.name + ' (' + p.score + ')', p.x - 20, p.y - 10);
+}
+
+function drawEnemies() {
+  gameState.enemies.forEach(enemy => {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+    ctx.fillStyle = '#FF0000';
+    ctx.fillRect(enemy.x + 5, enemy.y + 5, 8, 8);
+    ctx.fillRect(enemy.x + 17, enemy.y + 5, 8, 8);
+    ctx.fillStyle = '#333333';
+    ctx.fillRect(enemy.x - 10, enemy.y + 10, 10, 5);
+    ctx.fillStyle = '#00FF00';
+    ctx.fillRect(enemy.x, enemy.y - 10, (enemy.health / 3) * enemy.width, 5);
+  });
+}
+
+function drawBullets() {
+  gameState.bullets.forEach(bullet => {
+    ctx.fillStyle = '#FFFF00';
+    ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+  });
+}
+
+function drawHearts() {
+  ctx.font = 'bold 20px Arial';
+  ctx.fillText('❤️'.repeat(player.health), 10, 30);
+}
+
+function updatePlayer() {
+  if (keys['ArrowLeft']) player.velocityX = -player.speed;
+  else if (keys['ArrowRight']) player.velocityX = player.speed;
+  else player.velocityX = 0;
+
+  player.x += player.velocityX;
+  player.velocityY += gravity;
+  player.y += player.velocityY;
+
+  if (player.x < 0) player.x = 0;
+  if (player.x + player.width > canvas.width) player.x = canvas.width - player.width;
+  
+  platforms.forEach(p => {
+    if (
+      player.x < p.x + p.width &&
+      player.x + player.width > p.x &&
+      player.y + player.height >= p.y &&
+      player.y + player.height <= p.y + p.height + 10 &&
+      player.velocityY >= 0
+    ) {
+      player.y = p.y - player.height;
+      player.velocityY = 0;
+      player.jumping = false;
+    }
+  });
+  
+  if (player.y > canvas.height) {
+    player.health--;
+    if (player.health <= 0) {
+      gameState.gameRunning = false;
+      alert('Game Over! Score: ' + player.score);
+      location.reload();
+    }
+    player.y = 300;
+    player.x = 50;
+  }
+}
+
+function moveEnemies() {
+  gameState.enemies.forEach(enemy => {
+    enemy.x += enemy.directionX;
+    if (enemy.x <= enemy.minX || enemy.x >= enemy.maxX) {
+      enemy.directionX *= -1;
+    }
+    enemy.shootTimer++;
+    if (enemy.shootTimer > 60) {
+      gameState.bullets.push({
+        x: enemy.x,
+        y: enemy.y + 15,
+        velocityX: -5,
+        width: 8,
+        height: 4,
+        owner: 'enemy'
+      });
+      enemy.shootTimer = 0;
+    }
+  });
+}
+
+function moveBullets() {
+  gameState.bullets = gameState.bullets.filter(b => {
+    b.x += b.velocityX;
+    return b.x > 0 && b.x < canvas.width;
+  });
+}
+
+function checkCollisions() {
+  gameState.bullets = gameState.bullets.filter(bullet => {
+    if (bullet.owner === 'enemy') return true;
+    for (let i = gameState.enemies.length - 1; i >= 0; i--) {
+      const enemy = gameState.enemies[i];
+      if (bullet.x < enemy.x + enemy.width && bullet.x + bullet.width > enemy.x &&
+          bullet.y < enemy.y + enemy.height && bullet.y + bullet.height > enemy.y) {
+        enemy.health--;
+        player.score += 5;
+        if (enemy.health <= 0) {
+          gameState.enemies.splice(i, 1);
+          player.score += 50;
+          playKillSound();
+        }
+        return false;
+      }
+    }
+    return true;
+  });
+  
+  gameState.bullets = gameState.bullets.filter(bullet => {
+    if (bullet.owner !== 'enemy') return true;
+    if (bullet.x < player.x + player.width && bullet.x + bullet.width > player.x &&
+        bullet.y < player.y + player.height && bullet.y + bullet.height > player.y) {
+      player.health--;
+      if (player.health <= 0) {
+        gameState.gameRunning = false;
+        alert('Game Over! Score: ' + player.score);
+        location.reload();
+      }
+      player.y = 300;
+      player.x = 50;
+      return false;
+    }
+    return true;
+  });
+}
+
+function updatePlayersList() {
+  let list = 'Spieler: ';
+  for (let id in gameState.players) {
+    const p = gameState.players[id];
+    const color = p.color || '#FFFFFF';
+    list += `<span style="color: ${color}">● ${p.name}: ${p.score}</span>  `;
+  }
+  document.getElementById('playersList').innerHTML = list;
+}
+
+function gameLoop() {
+  if (!gameState.gameRunning) return;
+
+  ctx.fillStyle = '#87CEEB';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.fillRect(100, 50, 150, 40);
+  ctx.fillRect(500, 100, 180, 40);
+
+  updatePlayer();
+  moveEnemies();
+  moveBullets();
+  checkCollisions();
+
+  drawPlatforms();
+  drawBullets();
+  drawEnemies();
+  
+  for (let id in gameState.players) {
+    const p = gameState.players[id];
+    drawPlayer(p);
+  }
+  
+  drawHearts();
+  updatePlayersList();
+
+  requestAnimationFrame(gameLoop);
+}
+</script>
+</body>
+</html>
